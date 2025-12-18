@@ -1,0 +1,524 @@
+// ==UserScript==
+// @name         百度地图信息自动提取工具
+// @namespace    http://tampermonkey.net/
+// @version      1.4
+// @description  自动提取百度地图搜索结果中的商家名称、地址和电话信息，支持展示和复制
+// @author       YourName
+// @match        https://map.baidu.com/*
+// @grant        GM_setClipboard
+// @grant        GM_notification
+// @grant        GM_addStyle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // 添加自定义样式
+    GM_addStyle(`
+        #extract-info-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 330px;
+            max-height: 80vh;
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 9998;
+            overflow: hidden;
+            font-family: 'Microsoft YaHei', sans-serif;
+        }
+
+        #extract-info-header {
+            padding: 12px 15px;
+            background: #4CAF50;
+            color: white;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #extract-info-content {
+            padding: 15px;
+            max-height: calc(80vh - 150px);
+            overflow-y: auto;
+        }
+
+        .extract-info-section {
+            margin-bottom: 20px;
+        }
+
+        .extract-info-section-title {
+            font-weight: bold;
+            color: #4CAF50;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #4CAF50;
+            font-size: 16px;
+        }
+
+        .extract-info-section.no-phone .extract-info-section-title {
+            color: #ff9800;
+            border-bottom-color: #ff9800;
+        }
+
+        .extract-info-item {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .extract-info-item:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+        }
+
+        .extract-info-name {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+            font-size: 16px;
+        }
+
+        .extract-info-address, .extract-info-tel {
+            color: #666;
+            margin-bottom: 3px;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .extract-info-tel {
+            color: #4CAF50;
+            font-weight: 500;
+        }
+
+        #extract-info-close {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .extract-info-buttons {
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-top: 1px solid #eee;
+        }
+
+        .extract-info-copy-btn {
+            padding: 8px 12px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            flex: 1;
+        }
+
+        .extract-info-copy-btn:hover {
+            background-color: #0b7dda;
+        }
+
+        .extract-info-copy-btn.copy-all {
+            background-color: #4CAF50;
+        }
+
+        .extract-info-copy-btn.copy-all:hover {
+            background-color: #3d8b40;
+        }
+
+        .extract-info-copy-btn.copy-phone {
+            background-color: #9c27b0;
+        }
+
+        .extract-info-copy-btn.copy-phone:hover {
+            background-color: #27b077;
+        }
+
+        .extract-info-empty {
+            text-align: center;
+            color: #999;
+            padding: 20px 0;
+        }
+
+        .copy-item-btn {
+            margin-top: 5px;
+            padding: 4px 8px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .copy-item-btn:hover {
+            background-color: #4CAF50;
+        }
+
+        .extract-info-count {
+            font-size: 12px;
+            color: #888;
+            margin-top: 5px;
+            text-align: center;
+            padding: 5px;
+            background: #f9f9f9;
+            border-radius: 3px;
+        }
+
+        .extract-loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+
+        .extract-auto-text {
+            font-size: 12px;
+            color: #4CAF50;
+            text-align: center;
+            margin-top: 5px;
+        }
+    `);
+
+    // 存储提取的数据
+    let extractedData = {
+        withPhone: [],
+        withoutPhone: []
+    };
+
+    // 创建提取面板
+    function createExtractPanel() {
+        if (document.getElementById('extract-info-panel')) return;
+
+        const panel = document.createElement('div');
+        panel.id = 'extract-info-panel';
+
+        const header = document.createElement('div');
+        header.id = 'extract-info-header';
+        header.innerHTML = '提取的信息 <button id="extract-info-close">×</button>';
+
+        const content = document.createElement('div');
+        content.id = 'extract-info-content';
+        content.innerHTML = '<div class="extract-loading">正在自动提取信息...</div>';
+
+        // 创建按钮区域
+        const buttons = document.createElement('div');
+        buttons.className = 'extract-info-buttons';
+        buttons.innerHTML = `
+            <button class="extract-info-copy-btn copy-all" title="复制所有信息">复制全部</button>
+            <button class="extract-info-copy-btn copy-phone" title="只复制有电话的信息">复制电话</button>
+            <button class="extract-info-copy-btn" title="只复制当前显示的信息">复制当前</button>
+        `;
+
+        panel.appendChild(header);
+        panel.appendChild(content);
+        panel.appendChild(buttons);
+        document.body.appendChild(panel);
+
+        document.getElementById('extract-info-close').addEventListener('click', function() {
+            panel.style.display = 'none';
+        });
+
+        // 添加按钮事件
+        buttons.querySelector('.copy-all').addEventListener('click', copyAllInfo);
+        buttons.querySelector('.copy-phone').addEventListener('click', copyPhoneOnly);
+        buttons.querySelector('.extract-info-copy-btn:not(.copy-all):not(.copy-phone)').addEventListener('click', copyCurrentPage);
+
+        // 自动提取信息
+        setTimeout(extractAndShowInfo, 1000);
+    }
+
+    // 提取并显示信息
+    function extractAndShowInfo() {
+        const elements = document.querySelectorAll('.cf');
+        const content = document.getElementById('extract-info-content');
+
+        if (elements.length === 0) {
+            content.innerHTML = '<div class="extract-info-empty">未找到任何可提取的信息</div>';
+            GM_notification({
+               // text: '未找到可提取的信息',
+               // title: '提取完成',
+               // timeout: 2000
+            });
+            return;
+        }
+
+        // 清空之前的数据
+        extractedData.withPhone = [];
+        extractedData.withoutPhone = [];
+
+        // 遍历每个.cf元素并分类
+        elements.forEach((cfElement, index) => {
+            const nameElement = cfElement.querySelector('a.n-blue');
+            const name = nameElement ? nameElement.textContent.trim() : '未找到名称';
+
+            const addressElement = cfElement.querySelector('span.n-grey');
+            const address = addressElement ? addressElement.textContent.trim() : '未找到地址';
+
+            const telElement = cfElement.querySelector('div.row.tel');
+            let tel = '';
+            if (telElement) {
+                tel = telElement.textContent.replace('电话:', '').trim();
+                // 过滤掉无效的电话信息
+                if (tel === '未找到电话' || tel === '暂无电话' || !tel) {
+                    tel = '';
+                }
+            }
+
+            const item = {
+                index: index + 1,
+                name: name,
+                address: address,
+                tel: tel
+            };
+
+            if (tel) {
+                extractedData.withPhone.push(item);
+            } else {
+                extractedData.withoutPhone.push(item);
+            }
+        });
+
+        // 更新显示内容
+        content.innerHTML = '';
+
+        // 创建有电话的信息区块
+        if (extractedData.withPhone.length > 0) {
+            const section = createInfoSection('有电话信息', 'with-phone', extractedData.withPhone);
+            content.appendChild(section);
+        }
+
+        // 创建无电话的信息区块
+        if (extractedData.withoutPhone.length > 0) {
+            const section = createInfoSection('无电话信息', 'no-phone', extractedData.withoutPhone);
+            content.appendChild(section);
+        }
+
+        // 添加统计信息
+        const stats = document.createElement('div');
+        stats.className = 'extract-info-count';
+        stats.textContent = `总计: ${elements.length}条 | 有电话: ${extractedData.withPhone.length}条 | 无电话: ${extractedData.withoutPhone.length}条`;
+        content.appendChild(stats);
+
+        // 添加自动提取提示
+        const autoText = document.createElement('div');
+        autoText.className = 'extract-auto-text';
+        autoText.textContent = '信息已自动提取完成';
+        content.appendChild(autoText);
+
+        // 显示通知
+        GM_notification({
+           // text: `已自动提取${elements.length}条信息（${extractedData.withPhone.length}条有电话）`,
+           // title: '提取完成',
+           // timeout: 3000
+        });
+    }
+
+    // 创建信息区块
+    function createInfoSection(title, className, items) {
+        const section = document.createElement('div');
+        section.className = `extract-info-section ${className}`;
+
+        const sectionTitle = document.createElement('div');
+        sectionTitle.className = 'extract-info-section-title';
+        sectionTitle.textContent = `${title} (${items.length}条)`;
+        section.appendChild(sectionTitle);
+
+        items.forEach(item => {
+            const itemElement = document.createElement('div');
+            itemElement.className = 'extract-info-item';
+
+            let html = `<div class="extract-info-name">${item.index}. ${item.name}</div>`;
+            html += `<div class="extract-info-address">地址: ${item.address}</div>`;
+
+            if (item.tel) {
+                html += `<div class="extract-info-tel">电话: ${item.tel}</div>`;
+            } else {
+                html += `<div class="extract-info-tel">电话: 未找到电话</div>`;
+            }
+
+            // 添加单个复制按钮
+            html += `<button class="copy-item-btn" data-index="${item.index}">复制此项</button>`;
+
+            itemElement.innerHTML = html;
+            section.appendChild(itemElement);
+
+            // 添加单个复制事件
+            itemElement.querySelector('.copy-item-btn').addEventListener('click', function() {
+                copySingleItem(item);
+            });
+        });
+
+        return section;
+    }
+
+    // 复制单个项目
+    function copySingleItem(item) {
+        let text = `商家${item.index}:\n`;
+        text += `名称: ${item.name}\n`;
+        text += `地址: ${item.address}\n`;
+        text += `电话: ${item.tel || '未找到电话'}\n`;
+
+        GM_setClipboard(text, 'text');
+        GM_notification({
+           // text: `已复制第${item.index}条信息`,
+           // title: '复制成功',
+           // timeout: 1500
+        });
+    }
+
+    // 复制所有信息（包括有电话和无电话）
+    function copyAllInfo() {
+        let resultText = '';
+        let totalCount = 0;
+
+        if (extractedData.withPhone.length > 0) {
+            resultText += "=== 有电话信息 ===\n\n";
+            extractedData.withPhone.forEach(item => {
+                resultText += getItemText(item);
+                totalCount++;
+            });
+            resultText += "\n";
+        }
+
+        if (extractedData.withoutPhone.length > 0) {
+            resultText += "=== 无电话信息 ===\n\n";
+            extractedData.withoutPhone.forEach(item => {
+                resultText += getItemText(item);
+                totalCount++;
+            });
+        }
+
+        if (resultText) {
+            GM_setClipboard(resultText, 'text');
+            GM_notification({
+             //   text: `已成功复制${totalCount}条信息到剪贴板`,
+             //   title: '复制成功',
+             //   timeout: 2000
+            });
+        }
+    }
+
+    // 只复制有电话的信息
+    function copyPhoneOnly() {
+        if (extractedData.withPhone.length === 0) {
+            GM_notification({
+             //   text: '没有找到有电话的信息',
+             //   title: '复制失败',
+             //   timeout: 2000
+            });
+            return;
+        }
+
+        let resultText = "=== 有电话信息 ===\n\n";
+        extractedData.withPhone.forEach(item => {
+            resultText += getItemText(item);
+        });
+
+        GM_setClipboard(resultText, 'text');
+        GM_notification({
+          //  text: `已成功复制${extractedData.withPhone.length}条有电话信息`,
+          //  title: '复制成功',
+          //  timeout: 2000
+        });
+    }
+
+    // 复制当前页面显示的信息
+    function copyCurrentPage() {
+        const items = document.querySelectorAll('.extract-info-item');
+        if (items.length === 0) return;
+
+        let resultText = '';
+        let phoneCount = 0;
+        let noPhoneCount = 0;
+
+        // 先复制有电话的信息
+        const withPhoneSection = document.querySelector('.extract-info-section.with-phone');
+        if (withPhoneSection) {
+            resultText += "=== 有电话信息 ===\n\n";
+            withPhoneSection.querySelectorAll('.extract-info-item').forEach(item => {
+                resultText += getItemTextFromDOM(item);
+                phoneCount++;
+            });
+            resultText += "\n";
+        }
+
+        // 再复制无电话的信息
+        const withoutPhoneSection = document.querySelector('.extract-info-section.no-phone');
+        if (withoutPhoneSection) {
+            resultText += "=== 无电话信息 ===\n\n";
+            withoutPhoneSection.querySelectorAll('.extract-info-item').forEach(item => {
+                resultText += getItemTextFromDOM(item);
+                noPhoneCount++;
+            });
+        }
+
+        GM_setClipboard(resultText, 'text');
+        GM_notification({
+          //  text: `已复制${phoneCount + noPhoneCount}条信息（${phoneCount}有电话，${noPhoneCount}无电话）`,
+          //  title: '复制成功',
+          //  timeout: 2000
+        });
+    }
+
+    // 从数据对象获取项目文本
+    function getItemText(item) {
+        return `商家${item.index}:\n名称: ${item.name}\n地址: ${item.address}\n电话: ${item.tel || '未找到电话'}\n\n`;
+    }
+
+    // 从DOM元素获取项目文本
+    function getItemTextFromDOM(item) {
+        const name = item.querySelector('.extract-info-name').textContent;
+        const address = item.querySelector('.extract-info-address').textContent;
+        const tel = item.querySelector('.extract-info-tel').textContent;
+
+        return `${name}\n${address}\n${tel}\n\n`;
+    }
+
+    // 初始化
+    function init() {
+        createExtractPanel();
+    }
+
+    // 页面加载完成后初始化
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    // 监听DOM变化，如果页面内容更新则重新提取
+    const observer = new MutationObserver(function(mutations) {
+        // 检查是否有新的.cf元素被添加
+        const hasNewElements = mutations.some(mutation => {
+            return Array.from(mutation.addedNodes).some(node => {
+                return node.nodeType === 1 && (node.classList.contains('cf') || node.querySelector('.cf'));
+            });
+        });
+
+        if (hasNewElements) {
+            // 延迟一下再提取，确保新内容完全加载
+            setTimeout(extractAndShowInfo, 500);
+        }
+    });
+
+    // 开始观察
+    setTimeout(() => {
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }, 2000);
+})();
